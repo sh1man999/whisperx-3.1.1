@@ -100,7 +100,7 @@ def align(
         audio = torch.from_numpy(audio)
     if len(audio.shape) == 1:
         audio = audio.unsqueeze(0)
-    
+    torch.cuda.empty_cache()
     MAX_DURATION = audio.shape[1] / SAMPLE_RATE
 
     model_dictionary = align_model_metadata["dictionary"]
@@ -305,6 +305,8 @@ def align(
         aligned_subsegments= aligned_subsegments.groupby(["start", "end"], as_index=False).agg(agg_dict)
         aligned_subsegments = aligned_subsegments.to_dict('records')
         aligned_segments += aligned_subsegments
+
+        torch.cuda.empty_cache()
 
     # create word_segments list
     word_segments: List[SingleWordSegment] = []
