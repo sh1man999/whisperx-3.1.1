@@ -105,6 +105,7 @@ LANGUAGES = {
     "ba": "bashkir",
     "jw": "javanese",
     "su": "sundanese",
+    "yue": "cantonese",
 }
 
 # language code lookup by name, with a few language aliases
@@ -123,6 +124,7 @@ TO_LANGUAGE_CODE = {
     "castilian": "es",
 }
 
+LANGUAGES_WITHOUT_SPACES = ["ja", "zh"]
 
 system_encoding = sys.getdefaultencoding()
 
@@ -226,6 +228,9 @@ class SubtitlesWriter(ResultWriter):
         max_line_width = 1000 if raw_max_line_width is None else raw_max_line_width
         preserve_segments = max_line_count is None or raw_max_line_width is None
 
+        if len(result["segments"]) == 0:
+            return
+
         def iterate_subtitles():
             line_len = 0
             line_count = 1
@@ -277,7 +282,10 @@ class SubtitlesWriter(ResultWriter):
                 sstart, ssend, speaker = _[0]
                 subtitle_start = self.format_timestamp(sstart)
                 subtitle_end = self.format_timestamp(ssend)
-                subtitle_text = " ".join([word["word"] for word in subtitle])
+                if result["language"] in LANGUAGES_WITHOUT_SPACES:
+                    subtitle_text = "".join([word["word"] for word in subtitle])
+                else:
+                    subtitle_text = " ".join([word["word"] for word in subtitle])
                 has_timing = any(["start" in word for word in subtitle])
 
                 # add [$SPEAKER_ID]: to each subtitle if speaker is available
@@ -293,7 +301,7 @@ class SubtitlesWriter(ResultWriter):
                             start = self.format_timestamp(this_word["start"])
                             end = self.format_timestamp(this_word["end"])
                             if last != start:
-                                yield last, start, subtitle_text
+                                yield last, start, prefix + subtitle_text
 
                             yield start, end, prefix + " ".join(
                                 [
@@ -365,12 +373,34 @@ class WriteTSV(ResultWriter):
             print(round(1000 * segment["end"]), file=file, end="\t")
             print(segment["text"].strip().replace("\t", " "), file=file, flush=True)
 
+class WriteAudacity(ResultWriter):
+    """
+    Write a transcript to a text file that audacity can import as labels.
+    The extension used is "aud" to distinguish it from the txt file produced by WriteTXT.
+    Yet this is not an audacity project but only a label file!
+    
+    Please note : Audacity uses seconds in timestamps not ms! 
+    Also there is no header expected.
+
+    If speaker is provided it is prepended to the text between double square brackets [[]].
+    """
+
+    extension: str = "aud"    
+
+    def write_result(self, result: dict, file: TextIO, options: dict):
+        ARROW = "	"
+        for segment in result["segments"]:
+            print(segment["start"], file=file, end=ARROW)
+            print(segment["end"], file=file, end=ARROW)
+            print( ( ("[[" + segment["speaker"] + "]]") if "speaker" in segment else "") + segment["text"].strip().replace("\t", " "), file=file, flush=True)
+
+            
 
 class WriteJSON(ResultWriter):
     extension: str = "json"
 
     def write_result(self, result: dict, file: TextIO, options: dict):
-        json.dump(result, file)
+        json.dump(result, file, ensure_ascii=False)
 
 
 def get_writer(
@@ -383,6 +413,9 @@ def get_writer(
         "tsv": WriteTSV,
         "json": WriteJSON,
     }
+    optional_writers = {
+        "aud": WriteAudacity,
+    }
 
     if output_format == "all":
         all_writers = [writer(output_dir) for writer in writers.values()]
@@ -393,6 +426,8 @@ def get_writer(
 
         return write_all
 
+    if output_format in optional_writers:
+        return optional_writers[output_format](output_dir)
     return writers[output_format](output_dir)
 
 def interpolate_nans(x, method='nearest'):

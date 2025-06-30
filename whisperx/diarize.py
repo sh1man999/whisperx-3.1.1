@@ -4,24 +4,32 @@ from pyannote.audio import Pipeline
 from typing import Optional, Union
 import torch
 
+from .audio import load_audio, SAMPLE_RATE
+
+
 class DiarizationPipeline:
     def __init__(
         self,
-        model_name="pyannote/speaker-diarization@2.1",
+        model_name="pyannote/speaker-diarization-3.1",
         use_auth_token=None,
         device: Optional[Union[str, torch.device]] = "cpu",
     ):
         if isinstance(device, str):
             device = torch.device(device)
         self.model = Pipeline.from_pretrained(model_name, use_auth_token=use_auth_token).to(device)
-        self.model.embedding_batch_size = 8
+        self.model.embedding_batch_size=8
 
-    def __call__(self, audio, min_speakers=None, max_speakers=None):
-        segments = self.model(audio, min_speakers=min_speakers, max_speakers=max_speakers)
-        diarize_df = pd.DataFrame(segments.itertracks(yield_label=True))
-        diarize_df['start'] = diarize_df[0].apply(lambda x: x.start)
-        diarize_df['end'] = diarize_df[0].apply(lambda x: x.end)
-        diarize_df.rename(columns={2: "speaker"}, inplace=True)
+    def __call__(self, audio: Union[str, np.ndarray], min_speakers=None, max_speakers=None):
+        if isinstance(audio, str):
+            audio = load_audio(audio)
+        audio_data = {
+            'waveform': torch.from_numpy(audio[None, :]),
+            'sample_rate': SAMPLE_RATE
+        }
+        segments = self.model(audio_data, min_speakers=min_speakers, max_speakers=max_speakers)
+        diarize_df = pd.DataFrame(segments.itertracks(yield_label=True), columns=['segment', 'label', 'speaker'])
+        diarize_df['start'] = diarize_df['segment'].apply(lambda x: x.start)
+        diarize_df['end'] = diarize_df['segment'].apply(lambda x: x.end)
         return diarize_df
 
 
@@ -31,14 +39,18 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
         # assign speaker to segment (if any)
         diarize_df['intersection'] = np.minimum(diarize_df['end'], seg['end']) - np.maximum(diarize_df['start'], seg['start'])
         diarize_df['union'] = np.maximum(diarize_df['end'], seg['end']) - np.minimum(diarize_df['start'], seg['start'])
-        # remove no hit, otherwise we look for closest (even negative intersection...)
-        if not fill_nearest:
-            dia_tmp = diarize_df[diarize_df['intersection'] > 0]
-        else:
-            dia_tmp = diarize_df
-        if len(dia_tmp) > 0:
-            # sum over speakers
-            speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
+        
+        intersected = diarize_df[diarize_df["intersection"] > 0]
+
+        speaker = None
+        if len(intersected) > 0:
+            # Choosing most strong intersection
+            speaker = intersected.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
+        elif fill_nearest:
+            # Otherwise choosing closest
+            speaker = diarize_df.sort_values(by=["intersection"], ascending=False)["speaker"].values[0]
+
+        if speaker is not None:
             seg["speaker"] = speaker
         
         # assign speaker to words
@@ -47,15 +59,19 @@ def assign_word_speakers(diarize_df, transcript_result, fill_nearest=False):
                 if 'start' in word:
                     diarize_df['intersection'] = np.minimum(diarize_df['end'], word['end']) - np.maximum(diarize_df['start'], word['start'])
                     diarize_df['union'] = np.maximum(diarize_df['end'], word['end']) - np.minimum(diarize_df['start'], word['start'])
-                    # remove no hit
-                    if not fill_nearest:
-                        dia_tmp = diarize_df[diarize_df['intersection'] > 0]
-                    else:
-                        dia_tmp = diarize_df
-                    if len(dia_tmp) > 0:
-                        # sum over speakers
-                        speaker = dia_tmp.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
-                        word["speaker"] = speaker
+                    
+                    intersected = diarize_df[diarize_df["intersection"] > 0]
+
+                    word_speaker = None
+                    if len(intersected) > 0:
+                        # Choosing most strong intersection
+                        word_speaker = intersected.groupby("speaker")["intersection"].sum().sort_values(ascending=False).index[0]
+                    elif fill_nearest:
+                        # Otherwise choosing closest
+                        word_speaker = diarize_df.sort_values(by=["intersection"], ascending=False)["speaker"].values[0]
+
+                    if word_speaker is not None:
+                        word["speaker"] = word_speaker
         
     return transcript_result            
 
